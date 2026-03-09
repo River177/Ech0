@@ -5,8 +5,8 @@ WORKDIR /web
 
 COPY web/package.json web/pnpm-lock.yaml ./
 
-# 启用 corepack 并使用项目声明的 pnpm 版本
-RUN corepack enable
+# 安装 pnpm（使用 npm 全局安装，alpine 兼容性更好）
+RUN npm install -g pnpm@10.30.3
 
 # 安装依赖
 RUN pnpm install --frozen-lockfile
