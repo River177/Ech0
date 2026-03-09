@@ -1,0 +1,133 @@
+name: 自动部署到服务器（直接传输镜像）
+
+on:
+  push:
+    branches:
+      - main  # 当推送到 main 分支时触发
+    tags:
+      - 'v*'  # 当推送版本标签时触发
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  IMAGE_NAME: ech0
+  IMAGE_TAG: latest
+  GO_VERSION: '1.26'
+  NODE_VERSION: '20'
+
+jobs:
+  build-and-deploy:
+    name: 构建并部署
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2. 设置 Go 环境
+      - name: 设置 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      # 3. 设置 Node.js 环境
+      - name: 设置 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # 4. 安装 pnpm
+      - name: 安装 pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # 5. 构建前端
+      - name: 构建前端
+        working-directory: ./web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      # 6. 构建后端
+      - name: 构建后端
+        run: |
+          go mod download
+          go build -o ech0 -ldflags="-s -w" ./main.go
+
+      # 7. 构建 Docker 镜像
+      - name: 构建 Docker 镜像
+        run: |
+          docker build -t ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} -f Dockerfile .
+          
+      # 8. 保存 Docker 镜像为 tar 文件
+      - name: 导出 Docker 镜像
+        run: |
+          docker save ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }} | gzip > ech0-image.tar.gz
+          ls -lh ech0-image.tar.gz
+
+      # 9. 传输镜像到服务器并部署
+      - name: 传输镜像并部署
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          source: "ech0-image.tar.gz"
+          target: "/tmp/"
+
+      # 10. 在服务器上加载镜像并重启服务
+      - name: 部署到服务器
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: |
+            # 加载 Docker 镜像
+            echo "📦 加载 Docker 镜像..."
+            docker load < /tmp/ech0-image.tar.gz
+            
+            # 删除传输的临时文件
+            rm -f /tmp/ech0-image.tar.gz
+            
+            # 进入项目目录
+            cd /opt/ech0
+            
+            # 停止并删除旧容器
+            echo "🛑 停止旧容器..."
+            docker compose down
+            
+            # 启动新容器
+            echo "🚀 启动新容器..."
+            docker compose up -d
+            
+            # 清理悬空镜像（保留最近2个版本）
+            echo "🧹 清理旧镜像..."
+            docker image prune -f
+            
+            # 查看容器状态
+            echo "✅ 容器状态："
+            docker compose ps
+            
+            # 查看最新日志
+            echo "📋 最新日志："
+            docker compose logs --tail=50
+
+      # 11. 通知部署结果
+      - name: 部署成功通知
+        if: success()
+        run: |
+          echo "✅ 部署成功！"
+          echo "🚀 镜像名称: ${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+          echo "🌐 服务器: ${{ secrets.SERVER_HOST }}"
+
+      - name: 部署失败通知
+        if: failure()
+        run: |
+          echo "❌ 部署失败，请检查日志"
